@@ -6,156 +6,185 @@ from ConfigValidator.Config.Models.RunnerContext import RunnerContext
 from ConfigValidator.Config.Models.OperationType import OperationType
 from ProgressManager.Output.OutputProcedure import OutputProcedure as output
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 from os.path import dirname, realpath
 
 import os
-import signal
-import pandas as pd
-import time
 import subprocess
 import shlex
+import pandas as pd
+import time
 
 
 class RunnerConfig:
     ROOT_DIR = Path(dirname(realpath(__file__)))
 
-    # ================================ USER SPECIFIC CONFIG ================================
-    """The name of the experiment."""
-    name:                       str             = "Experiement Runner for Green Lab 1"
+    name: str = "GreenLab_Compiler_Experiment" + str(time.time)
+    results_output_path: Path = ROOT_DIR / "experiments"
+    operation_type: OperationType = OperationType.AUTO
+    time_between_runs_in_ms: int = 1000
 
-    """The path in which Experiment Runner will create a folder with the name `self.name`, in order to store the
-    results from this experiment. (Path does not need to exist - it will be created if necessary.)
-    Output path defaults to the config file's path, inside the folder 'experiments'"""
-    results_output_path:        Path             = ROOT_DIR / 'experiments'
-
-    """Experiment operation type. Unless you manually want to initiate each run, use `OperationType.AUTO`."""
-    operation_type:             OperationType   = OperationType.AUTO
-
-    """The time Experiment Runner will wait after a run completes.
-    This can be essential to accommodate for cooldown periods on some systems."""
-    time_between_runs_in_ms:    int             = 1000
-
-    # Dynamic configurations can be one-time satisfied here before the program takes the config as-is
-    # e.g. Setting some variable based on some criteria
     def __init__(self):
-        """Executes immediately after program start, on config load"""
-
         EventSubscriptionController.subscribe_to_multiple_events([
             (RunnerEvents.BEFORE_EXPERIMENT, self.before_experiment),
-            (RunnerEvents.BEFORE_RUN       , self.before_run       ),
-            (RunnerEvents.START_RUN        , self.start_run        ),
+            (RunnerEvents.BEFORE_RUN, self.before_run),
+            (RunnerEvents.START_RUN, self.start_run),
             (RunnerEvents.START_MEASUREMENT, self.start_measurement),
-            (RunnerEvents.INTERACT         , self.interact         ),
-            (RunnerEvents.STOP_MEASUREMENT , self.stop_measurement ),
-            (RunnerEvents.STOP_RUN         , self.stop_run         ),
+            (RunnerEvents.INTERACT, self.interact),
+            (RunnerEvents.STOP_MEASUREMENT, self.stop_measurement),
+            (RunnerEvents.STOP_RUN, self.stop_run),
             (RunnerEvents.POPULATE_RUN_DATA, self.populate_run_data),
-            (RunnerEvents.AFTER_EXPERIMENT , self.after_experiment )
+            (RunnerEvents.AFTER_EXPERIMENT, self.after_experiment),
         ])
-        self.run_table_model = None  # Initialized later
+        self.run_table_model = None
+        self.profiler = None
+        self.target = None
         output.console_log("Custom config loaded")
 
     def create_run_table_model(self) -> RunTableModel:
-        """Create and return the run_table model here. A run_table is a List (rows) of tuples (columns),
-        representing each run performed"""
-        compiler_factor = FactorModel("compiler", ['pure_python', 'cython', 'swig'])
+        compiler_factor = FactorModel("compiler", ["pure_python", "cython", "swig"])
         self.run_table_model = RunTableModel(
-            factors = [compiler_factor],
-            data_columns=['execution_time (s)', 'cpu_usage (%)', 'memory_usage (MB)', 'energy_consumption (J)'], 
+            factors=[compiler_factor],
+            data_columns=[
+                "execution_time (s)",
+                "cpu_usage (%)",
+                "memory_usage (MB)",
+                "energy_consumption (J)"
+            ],
             shuffle=True,
-            repetation=20
-            )
+            repetation=5
+        )
         return self.run_table_model
 
     def before_experiment(self) -> None:
-        """Perform any activity required before starting the experiment here
-        Invoked only once during the lifetime of the program."""
         output.console_log("Config.before_experiment() called!")
+        os.makedirs(self.results_output_path, exist_ok=True)
 
     def before_run(self) -> None:
-        """Perform any activity required before starting a run.
-        No context is available here as the run is not yet active (BEFORE RUN)"""
         output.console_log("Config.before_run() called!")
-      
 
     def start_run(self, context: RunnerContext) -> None:
-        """Perform any activity required for starting the run here.
-        For example, starting the target system to measure.
-        Activities after starting the run should also be performed here."""
-        # start the target
+        compiler = context.run_variation["compiler"]
+        target_dir = self.ROOT_DIR / compiler
+        target_script = target_dir / "main.py"
+
+        if not target_script.exists():
+            raise FileNotFoundError(f"Target script not found: {target_script}")
+
+        output.console_log(f"Starting run for compiler: {compiler}")
+
+        cmd = f"python {target_script}"
+        self.target = subprocess.Popen(
+            shlex.split(cmd),
+            cwd=target_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
 
     def start_measurement(self, context: RunnerContext) -> None:
-        """Perform any activity required for starting measurements."""
         output.console_log("Config.start_measurement() called!")
-        
         compiler = context.run_variation["compiler"]
-        profiler_cmd = f'energibridge \
-                        --interval 200 \
-                        --output {context.run_dir / "energibridge.csv"}\
-                        --summary python experiments/runner/{compiler}.py'
-
-        #time.sleep(1) # allow the process to run a little before measuring
-        
-        self.profiler = subprocess.Popen(shlex.split(profiler_cmd)) # stdout=energibridge_log
-
+        profiler_cmd = f"energibridge --output {context.run_dir / 'energibridge.csv'} --summary python experiments/runner/{compiler}.py"
+        self.profiler = subprocess.Popen(shlex.split(profiler_cmd))
+        time.sleep(0.5)
 
     def interact(self, context: RunnerContext) -> None:
-        """Perform any interaction with the running target system here, or block here until the target finishes."""
-
-        # No interaction. We just run it for XX seconds.
-        # Another example would be to wait for the target to finish, e.g. via `self.target.wait()`
-
+        output.console_log("Config.interact() called - waiting for target process.")
+        if self.target:
+            self.target.wait()
 
     def stop_measurement(self, context: RunnerContext) -> None:
-        """Perform any activity here required for stopping measurements."""
-        
-        
-        self.profiler.wait()
-	#output.console_log("Waiting for profiler stop...")
+        output.console_log("Config.stop_measurement() called!")
+        if self.profiler:
+            try:
+                self.profiler.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.profiler.terminate()
 
     def stop_run(self, context: RunnerContext) -> None:
-        """Perform any activity here required for stopping the run.
-        Activities after stopping the run should also be performed here."""
-        
-        #self.target.kill()
-        #self.target.wait()
-        #self.timestamp_end = datetime.now()
         output.console_log("Config.stop_run() called!")
-    
-    def populate_run_data(self, context: RunnerContext) -> Optional[Dict[str, Any]]:
-        """Parse and process any measurement data here.
-        You can also store the raw measurement data under `context.run_dir`
-        Returns a dictionary with keys `self.run_table_model.data_columns` and their values populated"""
+        if self.target and self.target.poll() is None:
+            self.target.terminate()
 
-        # energibridge.csv - Power consumption of the whole system
-        
-        df = pd.read_csv(context.run_dir / f"energibridge.csv")
-                
- 	# calculate the CPU USAGE
-        all_data = None
-        nb_point = 0
-        for metric in df.columns[1:]:  
-            if 'CPU_USAGE' in metric:
-                nb_point += 1
-                if all_data is None:
-                    all_data = df[metric].copy()
-                else:
-                    all_data += df[metric]
- 
-       
+    def populate_run_data(self, context: RunnerContext) -> Optional[Dict[str, Any]]:
+        csv_path = context.run_dir / "energibridge.csv"
+
+        if not csv_path.exists():
+            output.console_log(f"No measurement file found at {csv_path}")
+            return None
+
+        df = pd.read_csv(csv_path)
+
+        cpu_cols = [c for c in df.columns if "CPU_USAGE" in c]
+        avg_cpu = df[cpu_cols].mean().mean() if cpu_cols else 0
+
         run_data = {
-                'execution_time': round((df['Time'].iloc[-1] - df['Time'].iloc[0])/1000, 3),
-                'cpu_usage'    : round((all_data/nb_point).mean(), 3),     
-                'memory_usage'    : round(df['USED_MEMORY'].sum()*100/df['TOTAL_MEMORY'].sum(), 3),
-                'energy_usage': round(df['SYSTEM_POWER (Watts)'].mean(), 3)
+            "execution_time (s)": round((df["Time"].iloc[-1] - df["Time"].iloc[0]) / 1000, 3),
+            "cpu_usage (%)": round(avg_cpu, 3),
+            "memory_usage (MB)": round(df["USED_MEMORY"].mean() / 1024, 3),
+            "energy_consumption (J)": round(df["SYSTEM_POWER (Watts)"].mean(), 3),
         }
+
         return run_data
 
     def after_experiment(self) -> None:
-        """Perform any activity required after stopping the experiment here
-        Invoked only once during the lifetime of the program."""
-        pass
+        output.console_log("Config.after_experiment() called!")
 
-    # ================================ DO NOT ALTER BELOW THIS LINE ================================
-    experiment_path:            Path             = None
+    experiment_path: Path = None
+
+
+def run_experiment(config: RunnerConfig):
+    output.console_log(f"Starting experiment: {config.name}")
+
+    config.experiment_path = config.results_output_path / config.name
+    os.makedirs(config.experiment_path, exist_ok=True)
+
+    EventSubscriptionController.publish(RunnerEvents.BEFORE_EXPERIMENT)
+
+    run_table = config.create_run_table_model()
+    runs = run_table.generate_runs()
+
+    output.console_log(f"Total runs to perform: {len(runs)}")
+
+    for idx, run_variation in enumerate(runs, start=1):
+        output.console_log(f"Starting Run {idx}/{len(runs)}: {run_variation}")
+
+        run_dir = config.experiment_path / f"run_{idx:03d}"
+        os.makedirs(run_dir, exist_ok=True)
+
+        context = RunnerContext(
+            run_index=idx,
+            run_dir=run_dir,
+            run_variation=run_variation,
+            operation_type=config.operation_type
+        )
+
+        try:
+            EventSubscriptionController.publish(RunnerEvents.BEFORE_RUN)
+            EventSubscriptionController.publish(RunnerEvents.START_RUN, context)
+            EventSubscriptionController.publish(RunnerEvents.START_MEASUREMENT, context)
+            EventSubscriptionController.publish(RunnerEvents.INTERACT, context)
+            EventSubscriptionController.publish(RunnerEvents.STOP_MEASUREMENT, context)
+            EventSubscriptionController.publish(RunnerEvents.STOP_RUN, context)
+
+            run_data = EventSubscriptionController.publish(RunnerEvents.POPULATE_RUN_DATA, context)
+            if isinstance(run_data, dict):
+                run_table.add_result(run_variation, run_data)
+        except Exception as e:
+            output.console_log(f"Error during run {idx}: {e}")
+        finally:
+            output.console_log(f"Waiting {config.time_between_runs_in_ms} ms before next run...")
+            time.sleep(config.time_between_runs_in_ms / 1000.0)
+
+    EventSubscriptionController.publish(RunnerEvents.AFTER_EXPERIMENT)
+
+    result_file = config.experiment_path / "final_results.csv"
+    run_table.save_to_csv(result_file)
+    output.console_log(f"Experiment complete. Results saved to: {result_file}")
+
+
+if __name__ == "__main__":
+    cfg = RunnerConfig()
+    run_experiment(cfg)
